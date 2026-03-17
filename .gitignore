@@ -1,0 +1,38 @@
+# HAP pairing credentials — contains iOSDeviceLTSK (your private long-term secret key).
+# Anyone with this file can impersonate your controller to the device.
+# Generate your own with: python pair.py XXX-XX-XXX
+pairing.json
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+env/
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+
+# Test / coverage
+.pytest_cache/
+htmlcov/
+.coverage
+
+# IDEs
+.vscode/
+.idea/
+*.code-workspace
+
+# Windows
+desktop.ini
+*.lnk
+Thumbs.db
+
+# Logs
+*.log
+
+# OS
+.DS_Store

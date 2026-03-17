@@ -1,0 +1,11 @@
+{
+  "magrgb": {
+    "AccessoryPairingID": "XX:XX:XX:XX:XX:XX",
+    "AccessoryLTPK": "<64-char hex — accessory long-term public key>",
+    "iOSPairingId": "<uuid4>",
+    "iOSDeviceLTSK": "<64-char hex — YOUR PRIVATE KEY — treat like a password, never commit>",
+    "iOSDeviceLTPK": "<64-char hex — your long-term public key>",
+    "AccessoryAddress": "XX:XX:XX:XX:XX:XX",
+    "Connection": "BLE"
+  }
+}
