@@ -2,6 +2,8 @@
 
 > Full Python controller, SignalRGB integration, and technical protocol documentation for the **Secretlab Magnus XL RGB Strip** (co-developed with Nanoleaf, sold as MAGRGB).
 
+> **This is the original release** — solid colour HAP-BLE control via SignalRGB. If you want per-zone animation, protocol research, and LTPDU documentation, see [MAGRGB-ltpdu-controller](https://github.com/b00mhauercode/MAGRGB-ltpdu-controller).
+
 ---
 
 ## Table of Contents
