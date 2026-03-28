@@ -21,7 +21,6 @@ import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import urlparse
 
-from bleak import BleakScanner
 from aiohomekit.characteristic_cache import CharacteristicCacheMemory
 from aiohomekit.controller.ble.controller import BleController
 from aiohomekit.model import Accessories, AccessoriesState
@@ -29,42 +28,45 @@ from aiohomekit.model import Accessories, AccessoriesState
 from compat import CompatBleakScanner
 
 # ── Configuration ──────────────────────────────────────────────────────────────
-# EDIT THIS: set to the HAP-BLE MAC address of your MAGRGB strip.
-# Run scan.py to find it — look for the address with Manufacturer ID 76 (Apple).
-# All four scripts (pair.py, magnus_wled_bridge.py, test.py, discover_services.py)
-# use this constant and must be updated after a factory reset.
-DEVICE_MAC   = "XX:XX:XX:XX:XX:XX"
+try:
+    from config_local import DEVICE_MAC
+except ImportError:
+    from config import DEVICE_MAC
 PAIRING_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pairing.json")
 ALIAS        = "magrgb"
 WLED_MAC     = DEVICE_MAC.replace(":", "")   # derived — no need to edit separately
 
-# HAP characteristic IIDs (discovered via list_accessories_and_characteristics)
+# HAP characteristic IIDs
 AID     = 1
-IID_ON  = 51
-IID_BRI = 52
-IID_HUE = 53
-IID_SAT = 54
+IID_ON  = 51   # On/Off bool
+IID_BRI = 52   # Brightness 0-100
+IID_HUE = 53   # Hue 0-360
+IID_SAT = 54   # Saturation 0-100
+
+# Zone count for pixel averaging (kept for UDP handler)
+NUM_ZONES = 60
 
 HTTP_PORT     = 80
 UDP_PORT      = 21325
-SEND_INTERVAL = 0.1    # max 10 Hz — HAP-BLE is slower than raw GATT
+SEND_INTERVAL = 0.05   # 20 Hz — empirically faster, stable on good BLE link
 # ──────────────────────────────────────────────────────────────────────────────
 
 
 # ── Shared color state ─────────────────────────────────────────────────────────
 
-_lock       = threading.Lock()
-_pending    = None   # (r, g, b) or None
-_global_bri = 100    # 0-100
+_lock          = threading.Lock()
+_pending_zones = None   # list of NUM_ZONES (r, g, b) tuples, or None
+_global_bri    = 100    # 0-100
+_udp_count     = 0      # debug: total UDP frames received
 
-def set_color(r, g, b):
-    """Set the pending RGB color to be sent on the next HAP-BLE write cycle."""
-    global _pending
+
+def set_zones(zones):
+    global _pending_zones
     with _lock:
-        _pending = (r, g, b)
+        _pending_zones = zones
+
 
 def set_brightness(bri_0_100):
-    """Set global brightness (0–100), applied on top of per-color value."""
     global _global_bri
     with _lock:
         _global_bri = max(0, min(100, bri_0_100))
@@ -135,7 +137,7 @@ class WLEDHttpHandler(BaseHTTPRequestHandler):
                     set_brightness(round(data["bri"] / 255 * 100))
                     WLED_STATE["bri"] = data["bri"]
                 if data.get("on") is False:
-                    set_color(0, 0, 0)
+                    set_zones([(0, 0, 0)] * NUM_ZONES)
             except Exception as e:
                 print(f"  HTTP POST parse error: {e}")
             resp = b"{}"
@@ -155,26 +157,33 @@ class WLEDHttpHandler(BaseHTTPRequestHandler):
 
 class WLEDUdpHandler(socketserver.BaseRequestHandler):
     def handle(self):
+        global _udp_count
         data = self.request[0]
         if len(data) < 7:
             return
         if data[0] == 0x04:          # DRGB — 3 bytes per pixel after 4-byte header
             n = min(123, (len(data) - 4) // 3)
             if n > 0:
-                r = round(sum(data[4 + i*3] for i in range(n)) / n)
-                g = round(sum(data[5 + i*3] for i in range(n)) / n)
-                b = round(sum(data[6 + i*3] for i in range(n)) / n)
-                set_color(r, g, b)
-        elif data[0] == 0x01:        # WARLS
-            i = 2
-            while i + 3 <= len(data):
-                if data[i] == 0: set_color(data[i+1], data[i+2], data[i+3])
-                i += 4
+                zones = []
+                for z in range(NUM_ZONES):
+                    lo = int(z * n / NUM_ZONES)
+                    hi = max(lo + 1, int((z + 1) * n / NUM_ZONES))
+                    hi = min(hi, n)
+                    count = hi - lo
+                    r = round(sum(data[4 + (lo+i)*3]   for i in range(count)) / count)
+                    g = round(sum(data[4 + (lo+i)*3+1] for i in range(count)) / count)
+                    b = round(sum(data[4 + (lo+i)*3+2] for i in range(count)) / count)
+                    zones.append((r, g, b))
+                _udp_count += 1
+                if _udp_count % 30 == 1:   # log every 30 frames (~1/sec at 30fps)
+                    r0, g0, b0 = zones[0]
+                    print(f"  UDP frame #{_udp_count}  z0=rgb({r0},{g0},{b0})")
+                set_zones(zones)
         else:
             print(f"  UDP unknown protocol byte: 0x{data[0]:02x} (len={len(data)})")
 
 
-# ── HAP-BLE loop ───────────────────────────────────────────────────────────────
+# ── Animation helpers ──────────────────────────────────────────────────────────
 
 def rgb_to_hapsv(r, g, b):
     """RGB (0-255) → (hue 0-360, sat 0-100, bri 0-100)"""
@@ -182,9 +191,10 @@ def rgb_to_hapsv(r, g, b):
     return round(h * 360), round(s * 100), round(v * 100)
 
 
+# ── HAP-BLE loop ───────────────────────────────────────────────────────────────
+
 async def hap_loop():
-    """Main asyncio loop: reads pending color state and writes HAP-BLE characteristics."""
-    global _pending
+    """Main asyncio loop: averages all zones to one color, writes via lightbulb characteristics."""
 
     with open(PAIRING_FILE) as f:
         pairing_data = json.load(f)[ALIAS]
@@ -208,55 +218,72 @@ async def hap_loop():
     else:
         print("WARNING: Device not found in scan, attempting connection anyway...")
 
-    last_sent  = None
-    last_bri   = None
-    last_on    = None
-    last_time  = 0.0
+    print("Startup: turning on...")
+    await pairing.put_characteristics([(AID, IID_ON, True)])
+    await asyncio.sleep(0.5)
+    print("Ready.\n")
 
-    print("HAP-BLE loop running.\n")
+    last_time = 0.0
+    last_rgb  = None   # deduplicate full rgb — gate whether we write at all
+    last_h    = None   # per-channel dedup — only write channels that changed
+    last_s    = None
+    last_v    = None
+    strip_on  = True
 
     while True:
         try:
             now = asyncio.get_running_loop().time()
             with _lock:
-                color = _pending
+                zones = _pending_zones
                 bri   = _global_bri
 
-            if color is not None and (now - last_time) >= SEND_INTERVAL:
-                r, g, b = color
+            if zones is not None and (now - last_time) >= SEND_INTERVAL:
+                n = len(zones)
+                r = round(sum(z[0] for z in zones) / n)
+                g = round(sum(z[1] for z in zones) / n)
+                b = round(sum(z[2] for z in zones) / n)
+
                 is_off = (r == 0 and g == 0 and b == 0)
-                h, s, v = rgb_to_hapsv(r, g, b)
-                # Apply global brightness on top of value
-                effective_bri = round(v * bri / 100)
 
-                writes = []
                 if is_off:
-                    if last_on is not False:
-                        writes = [(AID, IID_ON, False)]
-                else:
-                    if last_on is not True:
-                        writes.append((AID, IID_ON, True))
-                    if (h, s, effective_bri) != last_sent:
-                        writes += [
-                            (AID, IID_HUE, h),
-                            (AID, IID_SAT, s),
-                            (AID, IID_BRI, effective_bri),
-                        ]
-
-                if writes:
-                    try:
-                        await pairing.put_characteristics(writes)
-                        last_sent = (h, s, effective_bri)
-                        last_bri  = bri
-                        last_on   = False if is_off else True
+                    if strip_on:
+                        await pairing.put_characteristics([(AID, IID_ON, False)])
+                        strip_on = False
+                        last_rgb = last_h = last_s = last_v = None
                         last_time = now
-                        if is_off:
-                            print("  HAP -> OFF")
-                        else:
-                            print(f"  HAP -> rgb({r},{g},{b})  hsv({h},{s},{effective_bri})")
-                    except Exception as e:
-                        print(f"  HAP write error: {e}")
-                        await asyncio.sleep(2)
+                        print("  HAP -> OFF")
+                elif (r, g, b) != last_rgb:
+                    h, s, v = rgb_to_hapsv(r, g, b)
+                    v_scaled = round(v * bri / 100)
+
+                    # Only include characteristics that actually changed
+                    h_changed = h       != last_h
+                    s_changed = s       != last_s
+                    v_changed = v_scaled != last_v
+
+                    writes = []
+                    if not strip_on:
+                        writes.append((AID, IID_ON, True))
+                        strip_on = True
+                    if h_changed:
+                        writes.append((AID, IID_HUE, h))
+                    if s_changed:
+                        writes.append((AID, IID_SAT, s))
+                    if v_changed:
+                        writes.append((AID, IID_BRI, v_scaled))
+
+                    if writes:
+                        await pairing.put_characteristics(writes)
+                        last_h = h
+                        last_s = s
+                        last_v = v_scaled
+                    last_rgb  = (r, g, b)
+                    last_time = now
+                    changed = ",".join(
+                        c for c, w in [("H", h_changed), ("S", s_changed), ("B", v_changed)]
+                        if w
+                    ) or "on"
+                    print(f"  HAP -> hsv({h},{s},{v_scaled})  rgb({r},{g},{b})  [{changed}]")
 
         except Exception as e:
             print(f"HAP loop error: {e}")

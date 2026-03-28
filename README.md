@@ -319,6 +319,7 @@ Drag the Magnus RGB Strip block on your canvas and assign any effect.
 
 ## Future Work
 
+- [ ] Per-zone color control via `COMMAND_INTERFACE` (IID 60) — protocol reverse-engineered in `MAGRGB-ltpdu-controller`, but device ignores writes in practice. Root cause unknown; lightbulb IID 51–54 used as fallback.
 - [ ] Thread provisioning + LTPDU protocol support (enables scenes/effects from the Nanoleaf ecosystem)
 - [ ] Auto-detect HAP MAC address on startup (handles address rotation after reset)
 - [ ] Apple HomeKit re-integration alongside bridge (HAP supports up to 16 controllers)
