@@ -1,8 +1,15 @@
-# Secretlab MAGRGB BLE Controller
+# Secretlab MAGRGB Controller
 
 > Full Python controller, SignalRGB integration, and technical protocol documentation for the **Secretlab Magnus XL RGB Strip** (co-developed with Nanoleaf, sold as MAGRGB).
 
-> **This is the original release** — solid colour HAP-BLE control via SignalRGB. If you want per-zone animation, protocol research, and LTPDU documentation, see [MAGRGB-ltpdu-controller](https://github.com/b00mhauercode/MAGRGB-ltpdu-controller).
+Two bridges are included — pick the one that suits your setup:
+
+| Bridge | Transport | Speed | Requires |
+|---|---|---|---|
+| `magnus_wled_bridge_thread.py` | Thread/UDP over IPv6 | ~20 Hz | Nanoleaf Desktop app (once at startup) |
+| `magnus_wled_bridge_hapble.py` | HAP-BLE (encrypted GATT) | ~10 Hz | HAP pairing (`pair.py`) |
+
+**Recommended: Thread/UDP** — faster, no BLE pairing needed, and the Nanoleaf Desktop app only needs to be running once to enable streaming mode.
 
 ---
 
@@ -11,13 +18,15 @@
 1. [Device Identification](#device-identification)
 2. [The Reverse Engineering Journey](#the-reverse-engineering-journey)
 3. [Protocol Specification](#protocol-specification)
-4. [Initial Setup](#initial-setup)
-5. [Script Reference](#script-reference)
-6. [SignalRGB Integration](#signalrgb-integration)
-7. [Architecture](#architecture)
-8. [Files in This Repo](#files-in-this-repo)
-9. [Future Work](#future-work)
-10. [Legal](#legal)
+4. [Initial Setup — Thread/UDP (recommended)](#initial-setup--threadudp-recommended)
+5. [Initial Setup — HAP-BLE (fallback)](#initial-setup--hap-ble-fallback)
+6. [Script Reference](#script-reference)
+7. [SignalRGB Integration](#signalrgb-integration)
+8. [Architecture](#architecture)
+9. [Files in This Repo](#files-in-this-repo)
+10. [Future Work](#future-work)
+11. [Troubleshooting](#troubleshooting)
+12. [Legal](#legal)
 
 ---
 
@@ -148,62 +157,137 @@ HAP has a discrete On/Off characteristic (IID 51). Sending RGB `(0,0,0)` does NO
 
 ---
 
-## Initial Setup
+## Initial Setup — Thread/UDP (recommended)
 
 ### Requirements
 
 - Python 3.9+
-- Windows 10/11 with Bluetooth LE adapter
-- The device **factory reset** (hold reset button ~10s until light flashes)
-
-> **Tested with:** Python 3.11, bleak 0.21, aiohomekit 3.2, SignalRGB 2.x, Windows 11 22H2+
+- Windows 10/11
+- **Nanoleaf Desktop app** installed and running (needed once to enable streaming mode)
+- Device reachable via Thread IPv6 (it connects through an Apple TV border router)
 
 ```bash
 pip install -r requirements.txt
 ```
 
-### Step 1 — Find the Device MACs
+### Step 1 — Pair via the Nanoleaf mobile app first
+
+> **Required before anything else.** The Nanoleaf Desktop app and the Python bridge both require the device to be on a Thread network. Only the Nanoleaf iOS/Android app can provision the device onto Thread.
+
+1. Factory reset the strip (hold reset ~10s until light flashes)
+2. Within 15 minutes of power-on, open the **Nanoleaf mobile app** on iOS or Android → Add Device → follow the Bluetooth pairing flow
+3. The mobile app provisions the device onto Thread through your Apple TV (or other Thread Border Router)
+4. Once the mobile app shows the device as connected, the Desktop app and bridge will be able to reach it
+
+> **After any factory reset**, the device gets a new Thread IPv6 address and token — you must repeat this step and update `config_local.py` (see Step 2).
+
+### Step 2 — Get your device info
+
+Open Wireshark and capture on the loopback adapter (`127.0.0.1`) while the Nanoleaf Desktop app is open. Filter:
+
+```
+tcp.port == 15765 and http
+```
+
+Look for a `POST /essentials/state` request — the JSON body contains `id`, `ip` (Thread IPv6), `token`, `port`, and `eui64` for your device.
+
+Alternatively — the values are already in `config_local.py` if they were set in a previous session and the device has not been factory reset since.
+
+### Step 3 — Update config_local.py
+
+```python
+DEVICE_MAC = "XX:XX:XX:XX:XX:XX"   # BLE MAC (only needed for HAP bridge)
+
+DEVICE_INFO = {
+    "controlVersion": 2,
+    "defaultName": "Secretlab MAGRGB XXBJ",
+    "id": "NXXXXXXXXX",
+    "ip": "fdXX:XXXX:XXXX:0:XXXX:XXXX:XXXX:XXXX",   # Thread IPv6
+    "model": "NL62",
+    "port": 5683,
+    "token": "XXXXXXXXXXXXXXXX",
+    "eui64": "XXXXXXXXXXXXXXXX",
+}
+```
+
+> **After a factory reset** both `ip` and `token` change. Get the new values from the Wireshark capture in Step 2.
+
+### Step 4 — Verify connectivity
+
+```bash
+ping -6 <Thread IPv6 address>
+```
+
+Should reply via the Apple TV border router at ~1–30ms.
+
+### Step 5 — Run the bridge
+
+Open Nanoleaf Desktop app first (only needed on first launch), then:
+
+```bash
+python magnus_wled_bridge_thread.py
+```
+
+Output:
+```
+WLED UDP on 127.0.0.2:21325
+WLED HTTP on :80
+Enabling stream control via Nanoleaf Desktop...
+  OK: b''
+Streaming to [fdc5:...]:60222
+Ready.
+```
+
+After the first successful run the device holds streaming mode — you can close the Nanoleaf Desktop app and it will continue working until the device is power-cycled.
+
+---
+
+## Initial Setup — HAP-BLE (fallback)
+
+Use this if the Thread path isn't available (no Apple TV, or device not on Thread).
+
+### Requirements
+
+- Python 3.9+
+- Windows 10/11 with **Bluetooth LE adapter**
+- Device factory reset (hold reset button ~10s until light flashes)
+
+### Step 1 — Find the HAP MAC
 
 ```bash
 python scan.py
-```
-
-Look for `Secretlab MAGRGB XXBJ`. Note both MAC addresses — you need the one with the **Apple manufacturer ID** for HAP pairing.
-
-```bash
 python scan_adv.py
 ```
 
-This shows raw advertisement data. The HAP address has `Manufacturer: {76: '06...'}`.
+Look for `Secretlab MAGRGB XXBJ`. The HAP address has `Manufacturer: {76: '06...'}` in the advertisement data.
 
-### Step 2 — Update DEVICE_MAC in all scripts
+Set it in `config_local.py`:
 
-Edit the `DEVICE_MAC` constant in **all four scripts** with the Apple manufacturer ID address found in Step 1:
+```python
+DEVICE_MAC = "XX:XX:XX:XX:XX:XX"   # Apple manufacturer ID address
+```
 
-- `pair.py`
-- `magnus_wled_bridge.py`
-- `test.py`
-- `discover_services.py`
-
-Each file has a `# EDIT THIS` comment above the constant.
-
-### Step 3 — Pair (one-time)
+### Step 2 — Pair (one-time)
 
 ```bash
 python pair.py XXX-XX-XXX
 ```
 
-Pass the 8-digit HomeKit setup code as a command-line argument. Format must be `XXX-XX-XXX`.
+Pass the 8-digit HomeKit setup code from the device label. This creates `pairing.json` — never commit it.
 
-This creates `pairing.json` with your long-term keypair. **Keep this file and never commit it** — it contains your private HAP credentials. It is already listed in `.gitignore`.
-
-### Step 4 — Test
+### Step 3 — Test
 
 ```bash
 python test.py
 ```
 
-The strip should cycle: RED → GREEN → BLUE → WHITE 50% → OFF.
+Strip should cycle: RED → GREEN → BLUE → WHITE 50% → OFF.
+
+### Step 4 — Run the bridge
+
+```bash
+python magnus_wled_bridge_hapble.py
+```
 
 ---
 
@@ -211,12 +295,13 @@ The strip should cycle: RED → GREEN → BLUE → WHITE 50% → OFF.
 
 | Script | Purpose | Usage |
 |---|---|---|
+| `magnus_wled_bridge_thread.py` | **Recommended bridge** — Thread/UDP, ~20 Hz | `python magnus_wled_bridge_thread.py` |
+| `magnus_wled_bridge_hapble.py` | Fallback bridge — HAP-BLE, ~10 Hz, needs pairing | `python magnus_wled_bridge_hapble.py` |
+| `pair.py` | One-time HAP-BLE pairing, saves `pairing.json` | `python pair.py XXX-XX-XXX` |
+| `test.py` | HAP-BLE color cycle test — RED/GREEN/BLUE/WHITE/OFF | `python test.py` |
 | `scan.py` | List all nearby BLE devices | `python scan.py` |
 | `scan_adv.py` | Show raw advertisement data for MAGRGB addresses | `python scan_adv.py` |
 | `discover_services.py` | Enumerate GATT services and characteristics | `python discover_services.py` |
-| `pair.py` | One-time HAP-BLE pairing, saves `pairing.json` | `python pair.py XXX-XX-XXX` |
-| `test.py` | Color cycle test — RED/GREEN/BLUE/WHITE/OFF | `python test.py` |
-| `magnus_wled_bridge.py` | SignalRGB WLED bridge (run as Administrator) | `python magnus_wled_bridge.py` |
 
 ---
 
@@ -228,17 +313,14 @@ The strip is exposed to SignalRGB as a **WLED device** — no custom plugin need
 
 **Step 1 — Start the bridge (run as Administrator for port 80)**
 
+Thread/UDP (recommended):
 ```bash
-python magnus_wled_bridge.py
+python magnus_wled_bridge_thread.py
 ```
 
-Output:
-```
-WLED UDP on 127.0.0.2:21325
-WLED HTTP on :80
-Waiting for XX:XX:XX:XX:XX:XX...
-Found: Secretlab MAGRGB XXBJ
-HAP-BLE loop running.
+HAP-BLE (fallback, needs pairing first):
+```bash
+python magnus_wled_bridge_hapble.py
 ```
 
 **Step 2 — Add in SignalRGB**
@@ -257,46 +339,64 @@ Drag the Magnus RGB Strip block on your canvas and assign any effect.
 ### Windows Auto-Start
 
 1. Open **Task Scheduler** → **Create Task**
-2. **General:** Name `Magnus BLE Bridge`, check **Run with highest privileges**
+2. **General:** Name `Magnus RGB Bridge`, check **Run with highest privileges**
 3. **Triggers:** At startup, delay 30 seconds
-4. **Actions:** Start `python`, arguments `C:\path\to\MAGRGB-controller\magnus_wled_bridge.py`, start in `C:\path\to\MAGRGB-controller`
+4. **Actions:** Start `python`, arguments `C:\path\to\MAGRGB-controller\magnus_wled_bridge_thread.py`, start in `C:\path\to\MAGRGB-controller`
 5. Save
+
+> For the Thread bridge, the Nanoleaf Desktop app must have been run at least once after the last device power-cycle to enable streaming mode. After that, the bridge works without the app.
 
 ---
 
 ## Architecture
 
+### Thread/UDP (recommended)
+
 ```
-╔═══════════════════════════════════════════════════════════════════╗
-║                         YOUR PC                                   ║
-║                      (127.0.0.2)                                  ║
-║                                                                   ║
-║  ┌─────────────────┐      ┌────────────────────────────────────┐  ║
-║  │   SignalRGB     │      │     magnus_wled_bridge.py          │  ║
-║  │                 │      │                                    │  ║
-║  │  Canvas effect  │─────▶│  HTTP :80    (WLED discovery)      │  ║
-║  │  assigns color  │ UDP  │  UDP  :21325 (DRGB color stream)   │  ║
-║  │  to MAGRGB      │─────▶│                                    │  ║
-║  └─────────────────┘      │  RGB→HSV conversion                │  ║
-║                            │  HAP-BLE asyncio loop, max 10 Hz  │  ║
-║                            └───────────────┬────────────────────┘  ║
-║                                            │ HAP-BLE               ║
-║                                            │ (ChaCha20-Poly1305    ║
-║                                            │  encrypted GATT)      ║
-╚════════════════════════════════════════════╪══════════════════════╝
-                                             │
-                                    ┌────────▼────────┐
-                                    │  Secretlab      │
-                                    │  MAGRGB         │
-                                    │  HAP-BLE GATT   │
-                                    └─────────────────┘
+╔══════════════════════════════════════════════════════════════════╗
+║                        YOUR PC (127.0.0.2)                       ║
+║                                                                  ║
+║  ┌──────────┐   ┌───────────────────────────────────────────┐   ║
+║  │SignalRGB │   │  magnus_wled_bridge_thread.py             │   ║
+║  │          │──▶│  HTTP :80 (WLED discovery)                │   ║
+║  │          │   │  UDP  :21325 (DRGB color stream)          │   ║
+║  └──────────┘   │  averages zones → single RGB              │   ║
+║                  │  UDP socket → [Thread IPv6]:60222  ~20 Hz│   ║
+║                  └───────────────────┬───────────────────────┘   ║
+╚══════════════════════════════════════╪═══════════════════════════╝
+                                       │ IPv6/UDP :60222
+                               ┌───────▼────────┐
+                               │  Apple TV      │
+                               │  Thread Border │
+                               │  Router        │
+                               └───────┬────────┘
+                                       │ Thread radio
+                               ┌───────▼────────┐
+                               │  Secretlab     │
+                               │  MAGRGB (NL62) │
+                               └────────────────┘
 ```
 
-**Key differences from raw GATT approaches:**
-- All BLE writes are encrypted (ChaCha20-Poly1305) — HAP session encryption
-- Color is HSV not RGB — converted before each write
-- On/Off is a separate characteristic — must be set explicitly, not inferred from black color
-- Max ~10 Hz update rate (HAP-BLE round-trip is slower than raw GATT)
+### HAP-BLE (fallback)
+
+```
+╔══════════════════════════════════════════════════════════════════╗
+║                        YOUR PC (127.0.0.2)                       ║
+║                                                                  ║
+║  ┌──────────┐   ┌───────────────────────────────────────────┐   ║
+║  │SignalRGB │   │  magnus_wled_bridge_hapble.py             │   ║
+║  │          │──▶│  HTTP :80 / UDP :21325                    │   ║
+║  └──────────┘   │  RGB→HSV conversion                       │   ║
+║                  │  aiohomekit put_characteristics  ~10 Hz  │   ║
+║                  └───────────────────┬───────────────────────┘   ║
+╚══════════════════════════════════════╪═══════════════════════════╝
+                                       │ BLE (ChaCha20-Poly1305)
+                               ┌───────▼────────┐
+                               │  Secretlab     │
+                               │  MAGRGB        │
+                               │  HAP-BLE GATT  │
+                               └────────────────┘
+```
 
 ---
 
@@ -304,25 +404,68 @@ Drag the Magnus RGB Strip block on your canvas and assign any effect.
 
 | File | Purpose |
 |---|---|
-| `pair.py` | **One-time pairing** — SRP pairing via HAP-BLE, saves `pairing.json` |
-| `magnus_wled_bridge.py` | **Main integration** — WLED emulator + HAP-BLE bridge for SignalRGB |
-| `test.py` | Color cycle test — verifies control works after pairing |
+| `magnus_wled_bridge_thread.py` | **Recommended bridge** — Thread/UDP to device, ~20 Hz, no BLE needed |
+| `magnus_wled_bridge_hapble.py` | **Fallback bridge** — HAP-BLE via aiohomekit, ~10 Hz, needs pairing |
+| `pair.py` | One-time HAP-BLE SRP pairing, saves `pairing.json` |
+| `test.py` | HAP-BLE color cycle test — RED/GREEN/BLUE/WHITE/OFF |
 | `scan.py` | BLE scanner — lists all nearby devices with names and MACs |
 | `scan_adv.py` | Advertisement scanner — shows raw manufacturer data for MAGRGB addresses |
 | `discover_services.py` | GATT service enumerator — lists all services and characteristics |
-| `compat.py` | Bleak 2.x compatibility shim used by bridge and test scripts |
-| `requirements.txt` | Python dependencies with minimum version bounds |
-| `pairing.json` | **Your long-term keypair** — generated by `pair.py`, gitignored (see `pairing.json.example`) |
-| `pairing.json.example` | Schema reference for `pairing.json` with redacted placeholder values |
+| `compat.py` | Bleak 2.x compatibility shim used by HAP-BLE scripts |
+| `config.py` | Config template — copy to `config_local.py` |
+| `config_local.py` | Your device config (MAC + Thread DEVICE_INFO) — gitignored |
+| `requirements.txt` | Python dependencies |
+| `pairing.json` | Your long-term HAP keypair — generated by `pair.py`, gitignored |
 
 ---
 
 ## Future Work
 
-- [ ] Per-zone color control via `COMMAND_INTERFACE` (IID 60) — protocol reverse-engineered in `MAGRGB-ltpdu-controller`, but device ignores writes in practice. Root cause unknown; lightbulb IID 51–54 used as fallback.
-- [ ] Thread provisioning + LTPDU protocol support (enables scenes/effects from the Nanoleaf ecosystem)
+- [x] Thread/UDP streaming — 20 Hz single-color via Nanoleaf external control protocol
+- [x] HAP-BLE single-color control via lightbulb characteristics (IID 51–54)
+- [ ] Per-zone color control — device exposes only panelID=0 in the Thread/Nanoleaf ecosystem; HAP-BLE STRIPES (IID 60) supports zones but produces animated (not static) colors, and device ignores static writes
+- [ ] Direct CoAP streaming to device IPv6:5683 — bypasses Nanoleaf Desktop app, eliminates the "run app once" startup requirement
 - [ ] Auto-detect HAP MAC address on startup (handles address rotation after reset)
-- [ ] Apple HomeKit re-integration alongside bridge (HAP supports up to 16 controllers)
+
+---
+
+## Troubleshooting
+
+### Bridge streams but no lights — after factory reset
+
+**Symptom:** Bridge prints `OK: b'{"...":{"isSuccess":true}}'` and sends `Thread -> rgb(...)` lines, but the strip does not light up.
+
+**Cause:** Factory reset assigns a new Thread IPv6 address and token. `config_local.py` still has the old address, so UDP packets go nowhere.
+
+**Fix:**
+
+1. Pair via the **Nanoleaf mobile app** first (see [Initial Setup — Thread/UDP](#initial-setup--threadudp-recommended) Step 1). The Desktop app cannot provision a Thread device — only the mobile app can.
+
+2. Get the new address from Wireshark. Capture on the loopback adapter, filter:
+   ```
+   tcp.port == 15765 and http
+   ```
+   Find `POST /essentials/state` — the request JSON contains the current `ip` and `token`.
+
+3. Update `config_local.py`:
+   ```python
+   DEVICE_INFO = {
+       ...
+       "ip":    "fdXX:XXXX:XXXX:0:XXXX:XXXX:XXXX:XXXX",
+       "token": "XXXXXXXXXXXXXXXX",
+       ...
+   }
+   ```
+
+4. Restart the bridge.
+
+### Nanoleaf Desktop app can't find the device
+
+**Cause:** The NL62 (MAGRGB) is Thread-only. The Desktop app requires:
+- A Thread Border Router on your network (Apple TV 4K, HomePod mini, Google Nest Hub 2nd gen, etc.)
+- The device already provisioned onto Thread — **only the Nanoleaf mobile app can do this**
+
+**Fix:** Pair via mobile app first, then re-open the Desktop app. The device will appear automatically once it is on the Thread network.
 
 ---
 
