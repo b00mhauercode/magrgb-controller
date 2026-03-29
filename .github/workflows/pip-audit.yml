@@ -22,10 +22,8 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install dependencies
-        run: pip install -r requirements.txt
+      - name: Install pip-audit
+        run: pip install pip-audit
 
       - name: Run pip-audit
-        uses: pypa/gh-action-pip-audit@v1
-        with:
-          inputs: requirements.txt
+        run: pip-audit -r requirements.txt
