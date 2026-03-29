@@ -46,7 +46,6 @@ except ImportError:
 
 DEVICE_IP    = DEVICE_INFO["ip"]         # Thread IPv6 address
 NANOLEAF_API = "http://127.0.0.1:15765"  # Nanoleaf Desktop local service
-NUM_ZONES    = 60
 HTTP_PORT    = 80
 UDP_PORT     = 21325
 STREAM_PORT  = 60222    # Nanoleaf external control UDP port on device
@@ -166,23 +165,15 @@ class WLEDUdpHandler(socketserver.BaseRequestHandler):
         if len(data) < 7:
             return
         if data[0] == 0x04:          # DRGB — 3 bytes per pixel after 4-byte header
-            n = min(123, (len(data) - 4) // 3)
+            n = (len(data) - 4) // 3
             if n > 0:
-                zones = []
-                for z in range(NUM_ZONES):
-                    lo = int(z * n / NUM_ZONES)
-                    hi = max(lo + 1, int((z + 1) * n / NUM_ZONES))
-                    hi = min(hi, n)
-                    count = hi - lo
-                    r = round(sum(data[4 + (lo+i)*3]   for i in range(count)) / count)
-                    g = round(sum(data[4 + (lo+i)*3+1] for i in range(count)) / count)
-                    b = round(sum(data[4 + (lo+i)*3+2] for i in range(count)) / count)
-                    zones.append((r, g, b))
+                r = round(sum(data[4 + i*3]   for i in range(n)) / n)
+                g = round(sum(data[4 + i*3+1] for i in range(n)) / n)
+                b = round(sum(data[4 + i*3+2] for i in range(n)) / n)
                 _udp_count += 1
                 if _udp_count % 30 == 1:
-                    r0, g0, b0 = zones[0]
-                    print(f"  UDP frame #{_udp_count}  z0=rgb({r0},{g0},{b0})")
-                set_zones(zones)
+                    print(f"  UDP frame #{_udp_count}  rgb({r},{g},{b})")
+                set_zones((r, g, b))
         else:
             print(f"  UDP unknown protocol byte: 0x{data[0]:02x} (len={len(data)})")
 
@@ -244,10 +235,9 @@ async def stream_loop():
                 bri   = _global_bri
 
             if zones is not None and (now - last_time) >= SEND_INTERVAL:
-                n = len(zones)
-                r = round(sum(z[0] for z in zones) / n * bri / 100)
-                g = round(sum(z[1] for z in zones) / n * bri / 100)
-                b = round(sum(z[2] for z in zones) / n * bri / 100)
+                r = round(zones[0] * bri / 100)
+                g = round(zones[1] * bri / 100)
+                b = round(zones[2] * bri / 100)
                 color = (r, g, b)
 
                 if color != last_color:
