@@ -176,7 +176,7 @@ pip install -r requirements.txt
 
 1. Factory reset the strip (hold reset ~10s until light flashes)
 2. Within 15 minutes of power-on, open the **Nanoleaf mobile app** on iOS or Android → Add Device → follow the Bluetooth pairing flow
-3. The mobile app provisions the device onto Thread through your Apple TV (or other Thread Border Router)
+3. The mobile app handles Apple Home and Thread provisioning in one flow — **do not add to Apple Home separately first** (it will show as already paired in the Nanoleaf app if you do)
 4. Once the mobile app shows the device as connected, the Desktop app and bridge will be able to reach it
 
 > **After any factory reset**, the device gets a new Thread IPv6 address and token — you must repeat this step and update `config_local.py` (see Step 2).
